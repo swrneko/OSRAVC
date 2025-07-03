@@ -11,4 +11,4 @@ echo "Installing python dependencies..."
 pip install -r requirements.txt
 pip install --no-cache-dir --compile --force-reinstall numpy==1.22.0 pandas==2.0.3 ctranslate2==4.6.0
 
-BLIS_ARCH=generic pip install TTS 
+BLIS_ARCH=generic pip install TTS==0.22.0 transformers==4.36.2

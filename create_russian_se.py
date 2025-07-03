@@ -1,51 +1,54 @@
 import torch
-import silero
 import os
+import warnings
+from TTS.api import TTS
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
 
-# Этот скрипт нужно запустить всего один раз!
+warnings.filterwarnings("ignore")
 
-print("Создание эталонного русского тембра...")
+try:
+    from TTS.tts.configs.xtts_config import XttsConfig
+    from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+    from TTS.config.shared_configs import BaseDatasetConfig
+    torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
+except ImportError as e:
+    pass
+
+print("Создание эталонного русского тембра для Coqui TTS...")
 
 device = "cpu"
-
-# Создаем папки, если их нет
-output_folder = "checkpoints/base_speakers/RU"
+output_folder = "checkpoints/base_speakers/RU_XTTS"
 os.makedirs(output_folder, exist_ok=True)
+os.makedirs('outputs/temp_colors', exist_ok=True)
 
-# --- Загружаем необходимые модели ---
+print("Загрузка Tone Color Converter...")
 tone_color_converter = ToneColorConverter(f'checkpoints/converter/config.json', device=device)
 tone_color_converter.load_ckpt(f'checkpoints/converter/checkpoint.pth')
 
-language = 'ru'
-model_id = 'v4_ru'
-speaker = 'eugene'
-sample_rate = 48000
-silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
-                                 model='silero_tts',
-                                 language=language,
-                                 speaker=model_id)
-silero_model.to(device)
+print("Загрузка модели Coqui TTS...")
+tts_model = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=True).to(device)
 
-# --- Генерируем длинную, нейтральную фразу для анализа ---
+# --- Генерируем фразу дефолтным голосом модели ---
+# Мы не указываем speaker_wav, и XTTS использует свой усредненный голос
 reference_text = '''
-В жизни каждого человека наступает момент, когда ему нужно сделать важный выбор. Это может быть выбор профессии, места для проживания, круга общения или даже решение о том, как провести свободное время. И хотя мы часто не осознаём важности каждого выбора, каждый из них влияет на наше будущее. Особенно это актуально, когда перед нами стоит решение, касающееся долгосрочных планов, изменений в жизни или переезда в другое место. Многие из этих решений могут повлиять не только на нас, но и на людей вокруг, на нашу семью, друзей и коллег.
+
+
+Душа моя озарена неземной радостью, как эти чудесные весенние утра, которыми я наслаждаюсь от всего сердца. Я совсем один и блаженствую в здешнем краю, словно созданном для таких, как я. Я так счастлив, мой друг, так упоен ощущением покоя, что искусство мое страдает от этого. Ни одного штриха не мог бы я сделать
 '''
-reference_wav_path = os.path.join(output_folder, "reference.wav")
-silero_model.save_wav(text=reference_text,
-                      speaker=speaker,
-                      sample_rate=sample_rate,
-                      audio_path=reference_wav_path)
+reference_wav_path = os.path.join(output_folder, "reference_xtts.wav")
 
-# --- Извлекаем тембр и сохраняем его в файл .pth ---
-output_se_path = os.path.join(output_folder, "ru_default_se.pth")
+print(f"Генерация эталонной фразы в файл: {reference_wav_path}")
+tts_model.tts_to_file(text=reference_text,
+                      file_path=reference_wav_path,
+                      speaker_wav='/home/swrneko/Documents/30alex_egorov.wav',
+                      language="ru")
 
-# Запускаем извлечение
+# --- Извлекаем тембр и сохраняем ---
+output_se_path = os.path.join(output_folder, "ru_xtts_se.pth")
+print(f"Извлечение тембра и сохранение в: {output_se_path}")
+
 source_se, _ = se_extractor.get_se(reference_wav_path, tone_color_converter, target_dir='outputs/temp_colors', vad=True)
-
-# Сохраняем тензор
 torch.save(source_se, output_se_path)
 
-print(f"Успешно создан файл эталонного русского тембра: {output_se_path}")
-print("Теперь можно удалить этот скрипт (create_russian_se.py) и файл reference.wav.")
+print(f"\nУСПЕХ! Создан файл эталонного русского тембра: {output_se_path}\n")
