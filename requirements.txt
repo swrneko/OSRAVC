@@ -1,17 +1,21 @@
 # Core audio and ML
 numpy==1.22.0
-pandas
+pandas==2.0.3
 librosa==0.9.1
 pydub==0.25.1
+scipy==1.11.4
 
 # Voice extraction (OpenVoice part)
-ctranslate2
+ctranslate2==4.6.0
 faster-whisper==0.9.0
 whisper-timestamped==1.14.2
 
 # Russian TTS
-silero
-ruaccent
+silero==0.4.1
+ruaccent==1.5.8.3
 
 # Web Interface
 gradio==3.48.0
+
+# Other
+unidecode=1.4.0
