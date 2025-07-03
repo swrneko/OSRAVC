@@ -4,6 +4,7 @@ pandas==2.0.3
 librosa==0.9.1
 pydub==0.25.1
 scipy==1.11.4
+wavmark==0.0.3
 
 # Voice extraction (OpenVoice part)
 ctranslate2==4.6.0
@@ -17,5 +18,9 @@ ruaccent==1.5.8.3
 # Web Interface
 gradio==3.48.0
 
-# Other
+# Openvoice will not work without this shit
 unidecode=1.4.0
+eng_to_ipa==0.0.2
+pypinyin==0.54.0
+jieba==0.42.1
+cn2an==0.5.23
