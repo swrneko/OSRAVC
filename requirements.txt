@@ -8,7 +8,7 @@ wavmark==0.0.3
 
 # Voice extraction (OpenVoice part)
 ctranslate2==4.6.0
-faster-whisper==0.9.0
+faster-whisper==1.1.1
 whisper-timestamped==1.14.2
 
 # Russian TTS
@@ -19,7 +19,7 @@ ruaccent==1.5.8.3
 gradio==3.48.0
 
 # Openvoice will not work without this shit
-unidecode=1.4.0
+unidecode==1.4.0
 eng_to_ipa==0.0.2
 pypinyin==0.54.0
 jieba==0.42.1
