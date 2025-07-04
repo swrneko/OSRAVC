@@ -7,3 +7,4 @@ examples*
 .env
 build
 *.zip
+xttsv2_banana/

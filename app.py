@@ -1,82 +1,170 @@
-import gradio as gr
 import os
 import torch
 import numpy as np
+import gradio as gr
 from scipy.io.wavfile import write as write_wav
 import warnings
-import silero
+
 from ruaccent import RUAccent
+from silero import silero_tts
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
 
 warnings.filterwarnings("ignore")
 
-print("Загрузка моделей...")
-device = "cpu"
-output_dir = "outputs"
-os.makedirs(output_dir, exist_ok=True)
-os.makedirs('outputs/temp_colors', exist_ok=True)
-os.makedirs('checkpoints/base_speakers/RU_SILERO', exist_ok=True)
+# --------------------
+# Константы и пути
+# --------------------
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE_STR = "cuda" if DEVICE.type == "cuda" else "cpu"
+OUTPUT_DIR = "outputs"
+TEMP_DIR = os.path.join(OUTPUT_DIR, "temp")
+TEMP_COLORS = os.path.join(TEMP_DIR, "colors")
+BASE_SE_DIR = "checkpoints/base_speakers/RU_SILERO"
+CONVERTER_CFG = "checkpoints/converter/config.json"
+CONVERTER_CKPT = "checkpoints/converter/checkpoint.pth"
+REF_TEXT = (
+    "Прекрасная пора и майский день дождливый. Сижу у окна и чувствую аромат. "
+    "Я вспоминаю с радостью сегодняшнюю встречу, и сердце бьётся в упоении. "
+    "Слышу голос, смотрю на букет. Я в эйфории! Снова вдыхаю запах сирени. "
+    "Вчитываюсь в письмо. После замираю. Ошибка в имени. Одна буква. Письмо сестре! "
+    "Мгновенно выступившие слёзы."
+)
+SAMPLE_RATE = 48000
+SPEAKER = "kseniya"
+LANGUAGE = "ru"
 
-tone_color_converter = ToneColorConverter(f'checkpoints/converter/config.json', device=device)
-tone_color_converter.load_ckpt(f'checkpoints/converter/checkpoint.pth')
+# --------------------
+# Подготовка папок
+# --------------------
+for path in (OUTPUT_DIR, TEMP_DIR, TEMP_COLORS, BASE_SE_DIR):
+    os.makedirs(path, exist_ok=True)
 
-language = 'ru'
-model_id = 'v4_ru'
-speaker = 'baya'
-silero_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models', model='silero_tts', language=language, speaker=model_id)
-silero_model.to(device)
+# --------------------
+# Загрузка моделей
+# --------------------
+print("🔄 Загрузка ToneColorConverter...")
+tone_color_converter = ToneColorConverter(CONVERTER_CFG, device=DEVICE_STR)
+tone_color_converter.load_ckpt(CONVERTER_CKPT)
 
+print("🔄 Загрузка Silero TTS...")
+hub_out = torch.hub.load(
+    repo_or_dir="snakers4/silero-models",
+    model="silero_tts",
+    language=LANGUAGE,
+    speaker=f"v3_1_{LANGUAGE}",
+    device=DEVICE_STR
+)
+silero_model = hub_out[0] if isinstance(hub_out, (tuple, list)) else hub_out
+
+print("🔄 Загрузка RUAccent...")
 accent_model = RUAccent()
-accent_model.load(omograph_model_size='big_poetry', use_dictionary=True)
+accent_model.load(omograph_model_size="big_poetry", use_dictionary=True)
 
-source_se_path = 'checkpoints/base_speakers/RU_XTTS/ru_xtts_se.pth'
+# --------------------
+# Подготовка эталонного тембра
+# --------------------
+source_se_path = os.path.join(BASE_SE_DIR, f"ru_{SPEAKER}_se.pth")
 if not os.path.exists(source_se_path):
-    print("Создание эталонного русского тембра...")
-    ref_text = "Здравствуйте, это стандартный образец голоса для системы клонирования тембра."
-    ref_wav = os.path.join(output_dir, "ru_reference.wav")
-    silero_model.save_wav(text=ref_text, speaker=speaker, sample_rate=48000, audio_path=ref_wav)
-    se, _ = se_extractor.get_se(ref_wav, tone_color_converter, target_dir='outputs/temp_colors', vad=True)
+    print(f"✨ Генерация эталонного тембра для `{SPEAKER}`...")
+    ref_wav = os.path.join(TEMP_DIR, "reference_silero.wav")
+    silero_model.save_wav(
+        text=REF_TEXT,
+        speaker=SPEAKER,
+        sample_rate=SAMPLE_RATE,
+        audio_path=ref_wav
+    )
+    se, _ = se_extractor.get_se(
+        ref_wav,
+        tone_color_converter,
+        target_dir=TEMP_COLORS,
+        vad=True
+    )
     torch.save(se, source_se_path)
-    print(f"Эталонный тембр для голоса '{speaker}' создан: {source_se_path}")
+    print(f"✅ Эталонный тембр сохранён: {source_se_path}")
 
-source_se = torch.load(source_se_path).to(device)
-print("Все модели успешно загружены.")
+source_se = torch.load(source_se_path, map_location=DEVICE).to(DEVICE)
+print("✅ Все модели и эталонный тембр готовы.")
 
-def accent_text(text):
-    if not text: return ""
+# --------------------
+# Функции генерации
+# --------------------
+def accent_text(text: str) -> str:
+    """Расставляет ударения в тексте."""
+    if not text.strip():
+        return ""
     return accent_model.process_all(text)
 
-def generate_russian_voice(accented_text, reference_audio_data):
-    if not accented_text: raise gr.Error("Введите текст.")
-    if reference_audio_data is None: raise gr.Error("Загрузите аудио-референс.")
-    
-    ref_sample_rate, ref_audio_array = reference_audio_data
-    temp_reference_path = os.path.join(output_dir, "temp_reference.wav")
-    write_wav(temp_reference_path, ref_sample_rate, ref_audio_array.astype(np.int16))
+def generate_voice(accented_text: str, reference_audio: tuple) -> str:
+    """Генерирует аудио с клонированием голоса."""
+    if not accented_text:
+        raise gr.Error("Введите текст для синтеза.")
+    if reference_audio is None:
+        raise gr.Error("Загрузите аудио-референс (5–15 сек, WAV без шума).")
 
-    base_speech_path = os.path.join(output_dir, 'base_russian_speech.wav')
-    silero_model.save_wav(text=accented_text, speaker=speaker, sample_rate=48000, audio_path=base_speech_path)
+    # Сохранение временного референса
+    sr, audio_np = reference_audio
+    ref_path = os.path.join(TEMP_DIR, "user_reference.wav")
 
-    target_se, _ = se_extractor.get_se(temp_reference_path, tone_color_converter, target_dir='outputs/temp_colors', vad=True)
+    if audio_np.dtype != np.int16:
+        audio_np = audio_np / np.max(np.abs(audio_np))
+        write_wav(ref_path, sr, (audio_np * 32767).astype(np.int16))
+    else:
+        write_wav(ref_path, sr, audio_np)
 
-    output_path = os.path.join(output_dir, 'generated_russian_voice.wav')
-    tone_color_converter.convert(audio_src_path=base_speech_path, src_se=source_se, tgt_se=target_se, output_path=output_path, message="@MyShell")
+    # Генерация базовой речи через Silero
+    base_path = os.path.join(TEMP_DIR, "base_speech.wav")
+    silero_model.save_wav(
+        text=accented_text,
+        speaker=SPEAKER,
+        sample_rate=SAMPLE_RATE,
+        audio_path=base_path
+    )
+
+    # Извлечение целевого spectral envelope
+    tgt_se, _ = se_extractor.get_se(
+        ref_path,
+        tone_color_converter,
+        target_dir=TEMP_COLORS,
+        vad=True
+    )
+
+    # Конвертация тембра
+    output_path = os.path.join(OUTPUT_DIR, "final_output.wav")
+    tone_color_converter.convert(
+        audio_src_path=base_path,
+        src_se=source_se,
+        tgt_se=tgt_se,
+        output_path=output_path,
+        message="@MyShell"
+    )
+
     return output_path
 
-with gr.Blocks(title="Russian OpenVoice UI", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# OpenVoice: Клонирование голоса на русском языке")
+# --------------------
+# Gradio UI
+# --------------------
+with gr.Blocks(title="OpenVoice RU", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("## OpenVoice Clone (Русский)")
+
     with gr.Row():
         with gr.Column(scale=2):
-            text_input = gr.Textbox(label="Текст", placeholder="Введите текст на русском языке.")
-            accent_button = gr.Button("Расставить ударения", variant="secondary")
-            accented_text_output = gr.Textbox(label="Проверка ударений", interactive=True)
-            audio_input = gr.Audio(label="Аудио-референс", type="numpy")
-            generate_button = gr.Button("Генерировать", variant="primary")
+            text_input = gr.Textbox(label="Текст для синтеза", placeholder="Введите текст...")
+            accent_button = gr.Button("Расставить ударения")
+            accented_output = gr.Textbox(label="Текст с ударениями", interactive=True)
+            audio_input = gr.Audio(label="Аудио-референс (WAV, 5–15 сек)", type="numpy")
+            gen_button = gr.Button("Генерировать", variant="primary")
         with gr.Column(scale=1):
-            audio_output = gr.Audio(label="Результат")
-    accent_button.click(fn=accent_text, inputs=[text_input], outputs=[accented_text_output])
-    generate_button.click(fn=generate_russian_voice, inputs=[accented_text_output, audio_input], outputs=[audio_output])
+            audio_output = gr.Audio(label="Синтезированный звук")
+
+    accent_button.click(accent_text, inputs=text_input, outputs=accented_output)
+    gen_button.click(generate_voice, inputs=[accented_output, audio_input], outputs=audio_output)
 
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.launch(
+        share=True,
+        enable_queue=True,
+        server_name="0.0.0.0",
+        server_port=7860
+    )
+
