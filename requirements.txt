@@ -5,6 +5,7 @@ librosa==0.9.1
 pydub==0.25.1
 scipy==1.11.4
 wavmark==0.0.3
+pyloudnorm==0.1.1
 
 # Voice extraction (OpenVoice part)
 ctranslate2==4.6.0
