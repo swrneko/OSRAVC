@@ -6,11 +6,17 @@ from scipy.io.wavfile import write as write_wav
 import warnings
 
 from ruaccent import RUAccent
-from silero import silero_tts
-from openvoice import se_extractor
-from openvoice.api import ToneColorConverter
+from TTS.api import TTS
 
 warnings.filterwarnings("ignore")
+
+try:
+    from TTS.tts.configs.xtts_config import XttsConfig
+    from TTS.tts.models.xtts import XttsAudioConfig, XttsArgs
+    from TTS.config.shared_configs import BaseDatasetConfig
+    torch.serialization.add_safe_globals([XttsConfig, XttsAudioConfig, BaseDatasetConfig, XttsArgs])
+except ImportError as e:
+    pass
 
 # --------------------
 # Константы и пути
@@ -19,10 +25,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEVICE_STR = "cuda" if DEVICE.type == "cuda" else "cpu"
 OUTPUT_DIR = "outputs"
 TEMP_DIR = os.path.join(OUTPUT_DIR, "temp")
-TEMP_COLORS = os.path.join(TEMP_DIR, "colors")
-BASE_SE_DIR = "checkpoints/base_speakers/RU_SILERO"
-CONVERTER_CFG = "checkpoints/converter/config.json"
-CONVERTER_CKPT = "checkpoints/converter/checkpoint.pth"
+BASE_SE_DIR = "checkpoints/base_speakers/RU_SILERO"  # не используется, но пусть будет для совместимости
 REF_TEXT = (
     "Прекрасная пора и майский день дождливый. Сижу у окна и чувствую аромат. "
     "Я вспоминаю с радостью сегодняшнюю встречу, и сердце бьётся в упоении. "
@@ -30,61 +33,26 @@ REF_TEXT = (
     "Вчитываюсь в письмо. После замираю. Ошибка в имени. Одна буква. Письмо сестре! "
     "Мгновенно выступившие слёзы."
 )
-SAMPLE_RATE = 48000
-SPEAKER = "kseniya"
+SAMPLE_RATE = 24000  # XTTS v2 выдаёт 24кГц по умолчанию
 LANGUAGE = "ru"
 
 # --------------------
 # Подготовка папок
 # --------------------
-for path in (OUTPUT_DIR, TEMP_DIR, TEMP_COLORS, BASE_SE_DIR):
+for path in (OUTPUT_DIR, TEMP_DIR):
     os.makedirs(path, exist_ok=True)
 
 # --------------------
 # Загрузка моделей
 # --------------------
-print("🔄 Загрузка ToneColorConverter...")
-tone_color_converter = ToneColorConverter(CONVERTER_CFG, device=DEVICE_STR)
-tone_color_converter.load_ckpt(CONVERTER_CKPT)
-
-print("🔄 Загрузка Silero TTS...")
-hub_out = torch.hub.load(
-    repo_or_dir="snakers4/silero-models",
-    model="silero_tts",
-    language=LANGUAGE,
-    speaker=f"v3_1_{LANGUAGE}",
-    device=DEVICE_STR
-)
-silero_model = hub_out[0] if isinstance(hub_out, (tuple, list)) else hub_out
+print("🔄 Загрузка XTTS v2...")
+tts = TTS(model_name="tts_models/multilingual/multi-dataset/xtts_v2").to(DEVICE_STR)
 
 print("🔄 Загрузка RUAccent...")
 accent_model = RUAccent()
 accent_model.load(omograph_model_size="big_poetry", use_dictionary=True)
 
-# --------------------
-# Подготовка эталонного тембра
-# --------------------
-source_se_path = os.path.join(BASE_SE_DIR, f"ru_{SPEAKER}_se.pth")
-if not os.path.exists(source_se_path):
-    print(f"✨ Генерация эталонного тембра для `{SPEAKER}`...")
-    ref_wav = os.path.join(TEMP_DIR, "reference_silero.wav")
-    silero_model.save_wav(
-        text=REF_TEXT,
-        speaker=SPEAKER,
-        sample_rate=SAMPLE_RATE,
-        audio_path=ref_wav
-    )
-    se, _ = se_extractor.get_se(
-        ref_wav,
-        tone_color_converter,
-        target_dir=TEMP_COLORS,
-        vad=True
-    )
-    torch.save(se, source_se_path)
-    print(f"✅ Эталонный тембр сохранён: {source_se_path}")
-
-source_se = torch.load(source_se_path, map_location=DEVICE).to(DEVICE)
-print("✅ Все модели и эталонный тембр готовы.")
+print("✅ Все модели готовы.")
 
 # --------------------
 # Функции генерации
@@ -95,57 +63,40 @@ def accent_text(text: str) -> str:
         return ""
     return accent_model.process_all(text)
 
-def generate_voice(accented_text: str, reference_audio: tuple) -> str:
-    """Генерирует аудио с клонированием голоса."""
+def generate_voice_xtts(accented_text: str, reference_audio: tuple) -> str:
+    """Генерирует аудио с клонированием голоса через XTTS v2."""
     if not accented_text:
         raise gr.Error("Введите текст для синтеза.")
     if reference_audio is None:
         raise gr.Error("Загрузите аудио-референс (5–15 сек, WAV без шума).")
 
-    # Сохранение временного референса
+    # Сохраняем временный референс
     sr, audio_np = reference_audio
     ref_path = os.path.join(TEMP_DIR, "user_reference.wav")
 
+    # XTTS требует int16 WAV
     if audio_np.dtype != np.int16:
         audio_np = audio_np / np.max(np.abs(audio_np))
         write_wav(ref_path, sr, (audio_np * 32767).astype(np.int16))
     else:
         write_wav(ref_path, sr, audio_np)
 
-    # Генерация базовой речи через Silero
-    base_path = os.path.join(TEMP_DIR, "base_speech.wav")
-    silero_model.save_wav(
-        text=accented_text,
-        speaker=SPEAKER,
-        sample_rate=SAMPLE_RATE,
-        audio_path=base_path
-    )
-
-    # Извлечение целевого spectral envelope
-    tgt_se, _ = se_extractor.get_se(
-        ref_path,
-        tone_color_converter,
-        target_dir=TEMP_COLORS,
-        vad=True
-    )
-
-    # Конвертация тембра
     output_path = os.path.join(OUTPUT_DIR, "final_output.wav")
-    tone_color_converter.convert(
-        audio_src_path=base_path,
-        src_se=source_se,
-        tgt_se=tgt_se,
-        output_path=output_path,
-        message="@MyShell"
+    tts.tts_to_file(
+        text=accented_text,
+        file_path=output_path,
+        speaker_wav=ref_path,
+        language=LANGUAGE,
+        split_sentences=True,
+        speed=1.0
     )
-
     return output_path
 
 # --------------------
 # Gradio UI
 # --------------------
-with gr.Blocks(title="OpenVoice RU", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("## OpenVoice Clone (Русский)")
+with gr.Blocks(title="OpenVoice RU (XTTS v2)", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("## XTTS v2 Voice Clone (Русский)")
 
     with gr.Row():
         with gr.Column(scale=2):
@@ -158,7 +109,7 @@ with gr.Blocks(title="OpenVoice RU", theme=gr.themes.Soft()) as demo:
             audio_output = gr.Audio(label="Синтезированный звук")
 
     accent_button.click(accent_text, inputs=text_input, outputs=accented_output)
-    gen_button.click(generate_voice, inputs=[accented_output, audio_input], outputs=audio_output)
+    gen_button.click(generate_voice_xtts, inputs=[accented_output, audio_input], outputs=audio_output)
 
 if __name__ == "__main__":
     demo.launch(
@@ -167,4 +118,3 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860
     )
-
